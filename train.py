@@ -310,13 +310,13 @@ if __name__ == '__main__':
       '--data_url',
       type=str,
       # pylint: disable=line-too-long
-      default='http://download.tensorflow.org/data/speech_commands_v0.02.tar.gz',
+      default='',
       # pylint: enable=line-too-long
       help='Location of speech training data archive on the web.')
   parser.add_argument(
       '--data_dir',
       type=str,
-      default='/tmp/speech_dataset/',
+      default='./speech_dataset/',
       help="""\
       Where to download the speech training data to.
       """)
@@ -388,7 +388,7 @@ if __name__ == '__main__':
   parser.add_argument(
       '--dct_coefficient_count',
       type=int,
-      default=40,
+      default=16,
       help='How many bins to use for the MFCC fingerprint',)
   parser.add_argument(
       '--how_many_training_steps',
@@ -413,7 +413,7 @@ if __name__ == '__main__':
   parser.add_argument(
       '--summaries_dir',
       type=str,
-      default='/tmp/retrain_logs',
+      default='./train/summary',
       help='Where to save summary logs for TensorBoard.')
   parser.add_argument(
       '--wanted_words',
@@ -423,7 +423,7 @@ if __name__ == '__main__':
   parser.add_argument(
       '--train_dir',
       type=str,
-      default='/tmp/speech_commands_train',
+      default='./train/ckpts',
       help='Directory to write event logs and checkpoint.')
   parser.add_argument(
       '--save_step_interval',
@@ -438,13 +438,13 @@ if __name__ == '__main__':
   parser.add_argument(
       '--model_architecture',
       type=str,
-      default='dnn',
+      default='basic_lstm',
       help='What model architecture to use')
   parser.add_argument(
       '--model_size_info',
       type=int,
       nargs="+",
-      default=[128,128,128],
+      default=[128],
       help='Model dimensions - different for various models')
   parser.add_argument(
       '--check_nans',

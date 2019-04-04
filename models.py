@@ -766,27 +766,24 @@ def create_basic_lstm_model(fingerprint_input, model_settings, model_size_info,
   input_time_size = model_settings['spectrogram_length']
   fingerprint_4d = tf.reshape(fingerprint_input,
                               [-1, input_time_size, input_frequency_size])
-
+  flow = tf.unstack(fingerprint_4d, input_time_size, axis=1) # required by static_rnn
   num_classes = model_settings['label_count']
-
+  # flow = fingerprint_4d
   if type(model_size_info) is list:
-    LSTM_units = model_size_info[0]
+    LSTM_units = model_size_info
   else:
-    LSTM_units = model_size_info 
-
+    LSTM_units = [model_size_info] 
+  num_layers = len(model_size_info)  
   with tf.name_scope('LSTM-Layer'):
-    with tf.variable_scope("lstm"): 
-      lstmcell = tf.contrib.rnn.BasicLSTMCell(LSTM_units, forget_bias=1.0, 
-                   state_is_tuple=True)
-      _, last = tf.nn.dynamic_rnn(cell=lstmcell, inputs=fingerprint_4d, 
-                  dtype=tf.float32)
-      flow = last[-1]
+    for i in range(num_layers):
+      lstmcell = tf.nn.rnn_cell.BasicLSTMCell(LSTM_units[i], forget_bias=0)
+      flow, [_, flow_t]= tf.nn.static_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
 
   with tf.name_scope('Output-Layer'):
-    W_o = tf.get_variable('W_o', shape=[LSTM_units, num_classes], 
+    W_o = tf.get_variable('W_o', shape=[LSTM_units[-1], num_classes], 
             initializer=tf.contrib.layers.xavier_initializer())
     b_o = tf.get_variable('b_o', shape=[num_classes])
-    logits = tf.matmul(flow, W_o) + b_o
+    logits = tf.matmul(flow_t, W_o) + b_o
 
   if is_training:
     return logits, dropout_prob
@@ -806,23 +803,24 @@ def create_lstm_model(fingerprint_input, model_settings, model_size_info,
   input_time_size = model_settings['spectrogram_length']
   fingerprint_4d = tf.reshape(fingerprint_input,
                               [-1, input_time_size, input_frequency_size])
-
+  flow = tf.unstack(fingerprint_4d, input_time_size, axis=1) # required by static_rnn
   num_classes = model_settings['label_count']
   projection_units = model_size_info[0]
   LSTM_units = model_size_info[1]
+  num_layers = int(len(model_size_info)/2)
+  print("number of layers: ", num_layers)
+
   with tf.name_scope('LSTM-Layer'):
     with tf.variable_scope("lstm"): 
-      lstmcell = tf.contrib.rnn.LSTMCell(LSTM_units, use_peepholes=True, 
-                   num_proj=projection_units)
-      _, last = tf.nn.dynamic_rnn(cell=lstmcell, inputs=fingerprint_4d, 
-                  dtype=tf.float32)
-      flow = last[-1]
+      for i in range(num_layers):
+        lstmcell = tf.nn.rnn_cell.LSTMCell(LSTM_units, forget_bias=0,num_proj=projection_units)
+        flow, [_, flow_t]= tf.nn.static_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
 
   with tf.name_scope('Output-Layer'):
     W_o = tf.get_variable('W_o', shape=[projection_units, num_classes], 
             initializer=tf.contrib.layers.xavier_initializer())
     b_o = tf.get_variable('b_o', shape=[num_classes])
-    logits = tf.matmul(flow, W_o) + b_o
+    logits = tf.matmul(flow_t, W_o) + b_o
 
   if is_training:
     return logits, dropout_prob

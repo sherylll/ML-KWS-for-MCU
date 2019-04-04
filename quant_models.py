@@ -31,12 +31,13 @@ import math
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
 from tensorflow.contrib.layers.python.layers import layers
-from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops, clip_ops
 from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn_ops
 from tensorflow.python.ops import rnn_cell_impl
 from tensorflow.python.ops import variable_scope as vs
+from tensorflow.python.framework import dtypes, ops, constant_op
 
 def prepare_model_settings(label_count, sample_rate, clip_duration_ms,
                            window_size_ms, window_stride_ms,
@@ -113,6 +114,12 @@ def create_model(fingerprint_input, model_settings, model_architecture,
   if model_architecture == 'dnn':
     return create_dnn_model(fingerprint_input, model_settings, model_size_info,
                               act_max, is_training)
+  elif model_architecture == 'basic_lstm':
+    return create_basic_lstm_model(fingerprint_input, model_settings, model_size_info,
+                              act_max, is_training) 
+  elif model_architecture == 'lstm':
+    return create_lstm_model(fingerprint_input, model_settings, model_size_info,
+                              act_max, is_training)                                                        
   elif model_architecture == 'ds_cnn':
     return create_ds_cnn_model(fingerprint_input, model_settings, 
                                  model_size_info, act_max, is_training)
@@ -338,3 +345,221 @@ def create_ds_cnn_model(fingerprint_input, model_settings, model_size_info,
   else:
     return logits
 
+def fake_quant(inputs, clamp, num_bits):
+  max_abs = 2**(num_bits-1) * 1.0
+  return tf.fake_quant_with_min_max_vars(inputs, -clamp, clamp-clamp/max_abs, num_bits=num_bits)
+
+GATE_RANGE=8
+NUM_BITS=8
+
+class BasicLSTMCell(tf.nn.rnn_cell.BasicLSTMCell):
+  def call(self, inputs, state):
+    """Long short-term memory cell (LSTM).
+
+    Args:
+      inputs: `2-D` tensor with shape `[batch_size, input_size]`.
+      state: An `LSTMStateTuple` of state tensors, each shaped
+        `[batch_size, num_units]`, if `state_is_tuple` has been set to
+        `True`.  Otherwise, a `Tensor` shaped
+        `[batch_size, 2 * num_units]`.
+
+    Returns:
+      A pair containing the new hidden state, and the new state (either a
+        `LSTMStateTuple` or a concatenated state, depending on
+        `state_is_tuple`).
+    """
+    sigmoid = math_ops.sigmoid
+    one = constant_op.constant(1, dtype=dtypes.int32)
+    # Parameters of gates are concatenated into one multiply for efficiency.
+    if self._state_is_tuple:
+      c, h = state
+    else:
+      c, h = array_ops.split(value=state, num_or_size_splits=2, axis=one)
+
+    gate_inputs = math_ops.matmul(
+        array_ops.concat([inputs, h], 1), self._kernel)
+    gate_inputs = nn_ops.bias_add(gate_inputs, self._bias)
+
+    # tf.summary.histogram('gate', gate_inputs) # works
+    # tf.summary.histogram('c_state', c) # works
+
+    # i = input_gate, j = new_input, f = forget_gate, o = output_gate
+    i, j, f, o = array_ops.split(
+        value=gate_inputs, num_or_size_splits=4, axis=one)
+
+    i = fake_quant(i, GATE_RANGE, NUM_BITS)
+    j = fake_quant(j, GATE_RANGE, NUM_BITS)
+    f = fake_quant(f, GATE_RANGE, NUM_BITS)
+    o = fake_quant(o, GATE_RANGE, NUM_BITS)
+
+    forget_bias_tensor = constant_op.constant(self._forget_bias, dtype=f.dtype)
+    # Note that using `add` and `multiply` instead of `+` and `*` gives a
+    # performance improvement. So using those at the cost of readability.
+    add = math_ops.add
+    multiply = math_ops.multiply
+    # new_c = add(multiply(c, sigmoid(add(f, forget_bias_tensor))),
+    #             multiply(sigmoid(i), self._activation(j)))
+    # new_h = multiply(self._activation(new_c), sigmoid(o))
+
+    f_sig = fake_quant(sigmoid(add(f, forget_bias_tensor)), GATE_RANGE, NUM_BITS)
+
+    new_c_1 = fake_quant(multiply(c, f_sig), GATE_RANGE, NUM_BITS)
+
+    i_sig = fake_quant(sigmoid(i), GATE_RANGE, NUM_BITS)
+
+    j_act = fake_quant(self._activation(j), GATE_RANGE, NUM_BITS)
+
+    new_c_2 = fake_quant(multiply(i_sig, j_act), GATE_RANGE, NUM_BITS)
+
+    new_c = fake_quant(add(new_c_1, new_c_2), GATE_RANGE, NUM_BITS)
+
+    o_sig = fake_quant(sigmoid(o), GATE_RANGE, NUM_BITS)
+
+    c_act = fake_quant(self._activation(new_c), GATE_RANGE, NUM_BITS)
+
+    new_h = fake_quant(multiply(c_act, o_sig), GATE_RANGE, NUM_BITS)
+    if self._state_is_tuple:
+      new_state = tf.nn.rnn_cell.LSTMStateTuple(new_c, new_h)
+    else:
+      new_state = array_ops.concat([new_c, new_h], 1)
+    return new_h, new_state    
+
+def create_basic_lstm_model(fingerprint_input, model_settings, model_size_info, 
+                              act_max, is_training):
+  """Builds a model with a basic lstm layer (without output projection and 
+       peep-hole connections)
+  model_size_info: defines the number of memory cells in basic lstm model
+  """
+  if is_training:
+    dropout_prob = tf.placeholder(tf.float32, name='dropout_prob')
+  input_frequency_size = model_settings['dct_coefficient_count']
+  input_time_size = model_settings['spectrogram_length']
+  fingerprint_4d = tf.reshape(fingerprint_input,
+                              [-1, input_time_size, input_frequency_size])
+  
+  flow = fake_quant(fingerprint_4d, act_max[0], 8)  
+  flow = tf.unstack(fingerprint_4d, input_time_size, axis=1) # required by static_rnn
+
+  num_classes = model_settings['label_count']
+  # flow = fingerprint_4d
+  if type(model_size_info) is list:
+    LSTM_units = model_size_info
+  else:
+    LSTM_units = [model_size_info] 
+  num_layers = len(model_size_info)  
+  # tf.summary.histogram('fingerprints', flow)
+
+  with tf.name_scope('LSTM-Layer'):
+    for i in range(num_layers):
+      lstmcell = BasicLSTMCell(LSTM_units[i], forget_bias=0)
+      flow, [_, flow_t]= tf.nn.static_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
+      # tf.summary.histogram('h_state', flow)
+      flow_t = fake_quant(flow_t, act_max[i+1], 8)
+
+  with tf.name_scope('Output-Layer'):
+    W_o = tf.get_variable('W_o', shape=[LSTM_units[-1], num_classes], 
+            initializer=tf.contrib.layers.xavier_initializer())
+    b_o = tf.get_variable('b_o', shape=[num_classes])
+    logits = tf.matmul(flow_t, W_o) + b_o
+    # tf.summary.histogram('logits', logits)
+
+    logits = fake_quant(logits, act_max[num_layers+1], 8)
+
+  if is_training:
+    return logits, dropout_prob
+  else:
+    return logits
+
+class LSTMCell(tf.nn.rnn_cell.LSTMCell):
+  def call(self, inputs, state, gate_range=8, proj_bits=8, num_bits=8):
+    """ quantized version of lstm cell with projection layer and w/o peephole
+    """
+    num_proj = self._num_units if self._num_proj is None else self._num_proj
+    sigmoid = math_ops.sigmoid
+
+    if self._state_is_tuple:
+      (c_prev, m_prev) = state
+    else:
+      c_prev = array_ops.slice(state, [0, 0], [-1, self._num_units])
+      m_prev = array_ops.slice(state, [0, self._num_units], [-1, num_proj])
+
+    c_prev = fake_quant(c_prev, gate_range, num_bits)
+    m_prev = fake_quant(m_prev, gate_range, proj_bits)
+
+    # i = input_gate, j = new_input, f = forget_gate, o = output_gate
+    lstm_matrix = math_ops.matmul(
+        array_ops.concat([inputs, m_prev], 1), self._kernel)
+    lstm_matrix = nn_ops.bias_add(lstm_matrix, self._bias)
+
+    # check internal value range
+    # tf.summary.histogram('gate', lstm_matrix)
+    # tf.summary.histogram('c_state', c_prev)
+    # tf.summary.histogram('m_state', m_prev)
+
+    i, j, f, o = array_ops.split(
+        value=lstm_matrix, num_or_size_splits=4, axis=1)
+
+    i = fake_quant(i, gate_range, num_bits)
+    j = fake_quant(j, gate_range, num_bits)
+    f = fake_quant(f, gate_range, num_bits)
+    o = fake_quant(o, gate_range, num_bits)
+
+    # Diagonal connections
+    c1 = sigmoid(f + self._forget_bias) * c_prev
+    c1 = fake_quant(c1, gate_range, num_bits)
+    c2 = sigmoid(i) * self._activation(j)
+    c2 = fake_quant(c2, gate_range, num_bits)
+    c = c1 + c2
+
+    # TODO: test effects of clipping
+    if self._cell_clip is not None:
+      # pylint: disable=invalid-unary-operand-type
+      c = clip_ops.clip_by_value(c, -self._cell_clip, self._cell_clip)
+      # pylint: enable=invalid-unary-operand-type
+
+    m = sigmoid(o) * self._activation(c)
+    m = fake_quant(m, gate_range, proj_bits)
+
+    m = math_ops.matmul(m, self._proj_kernel)
+
+    if self._proj_clip is not None:
+      # pylint: disable=invalid-unary-operand-type
+      m = clip_ops.clip_by_value(m, -self._proj_clip, self._proj_clip)
+      # pylint: enable=invalid-unary-operand-type
+
+    new_state = (tf.nn.rnn_cell.LSTMStateTuple(c, m) if self._state_is_tuple else
+                 array_ops.concat([c, m], 1))
+    return m, new_state
+
+def create_lstm_model(fingerprint_input, model_settings, model_size_info, act_max,
+                        is_training):
+  if is_training:
+    dropout_prob = tf.placeholder(tf.float32, name='dropout_prob')
+  input_frequency_size = model_settings['dct_coefficient_count']
+  input_time_size = model_settings['spectrogram_length']
+  fingerprint_4d = tf.reshape(fingerprint_input,
+                              [-1, input_time_size, input_frequency_size])
+  flow = fake_quant(fingerprint_4d, act_max[0], 8)    
+  flow = tf.unstack(fingerprint_4d, input_time_size, axis=1) # required by static_rnn
+  num_classes = model_settings['label_count']
+  projection_units = model_size_info[0]
+  LSTM_units = model_size_info[1]
+  num_layers = int(len(model_size_info)/2)
+  # print("number of layers: ", num_layers)
+  with tf.name_scope('LSTM-Layer'):
+    with tf.variable_scope("lstm"): 
+      for i in range(num_layers):
+        lstmcell = LSTMCell(LSTM_units, forget_bias=0,num_proj=projection_units)
+        flow, [_, flow_t]= tf.nn.static_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
+
+  with tf.name_scope('Output-Layer'):
+    W_o = tf.get_variable('W_o', shape=[projection_units, num_classes], 
+            initializer=tf.contrib.layers.xavier_initializer())
+    b_o = tf.get_variable('b_o', shape=[num_classes])
+    logits = tf.matmul(flow_t, W_o) + b_o
+    # logits = fake_quant(logits, act_max[num_layers+1], 8)
+    logits = fake_quant(logits, 32, 8)
+  if is_training:
+    return logits, dropout_prob
+  else:
+    return logits

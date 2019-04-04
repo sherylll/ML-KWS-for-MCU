@@ -66,6 +66,7 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
   
   label_count = model_settings['label_count']
   fingerprint_size = model_settings['fingerprint_size']
+  time_shift_samples = int((100.0 * FLAGS.sample_rate) / 1000)
 
   fingerprint_input = tf.placeholder(
       tf.float32, [None, fingerprint_size], name='fingerprint_input')
@@ -77,9 +78,25 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
       FLAGS.model_size_info,
       FLAGS.act_max,
       is_training=False)
-
   ground_truth_input = tf.placeholder(
-      tf.float32, [None, label_count], name='groundtruth_input')
+    tf.float32, [None, label_count], name='groundtruth_input')    
+
+  if FLAGS.if_retrain:
+    with tf.name_scope('cross_entropy'):
+      cross_entropy_mean = tf.reduce_mean(
+        tf.nn.softmax_cross_entropy_with_logits(labels=ground_truth_input, logits=logits))
+    tf.summary.scalar('cross_entropy', cross_entropy_mean)
+    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+    with tf.name_scope('train'), tf.control_dependencies(update_ops):
+      train_op = tf.train.AdamOptimizer(learning_rate=0.0001)
+      train_step = tf.contrib.slim.learning.create_train_op(cross_entropy_mean, train_op)
+
+  saver = tf.train.Saver(tf.global_variables())
+  merged = tf.summary.merge_all()
+  test_writer = tf.summary.FileWriter(FLAGS.summaries_dir + '/test', sess.graph)
+  train_writer = tf.summary.FileWriter(FLAGS.summaries_dir + '/train')
+  validation_writer = tf.summary.FileWriter(FLAGS.summaries_dir + '/validation')
+  tf.global_variables_initializer().run()
 
   predicted_indices = tf.argmax(logits, 1)
   expected_indices = tf.argmax(ground_truth_input, 1)
@@ -88,7 +105,6 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
       expected_indices, predicted_indices, num_classes=label_count)
   evaluation_step = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
   models.load_variables_from_checkpoint(sess, FLAGS.checkpoint)
-
 
   # Quantize weights to 8-bits using (min,max) and write to file
   f = open('weights.h','wb')
@@ -105,15 +121,15 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
     var_values = np.round(var_values*2**dec_bits)
     var_name = var_name.replace('/','_')
     var_name = var_name.replace(':','_')
-    with open('weights.h','a') as f:
-      f.write('#define '+var_name+' {')
-    if(len(var_values.shape)>2): #convolution layer weights
-      transposed_wts = np.transpose(var_values,(3,0,1,2))
-    else: #fully connected layer weights or biases of any layer
-      transposed_wts = np.transpose(var_values)
-    with open('weights.h','a') as f:
-      transposed_wts.tofile(f,sep=", ",format="%d")
-      f.write('}\n')
+    # with open('weights.h','a') as f:
+    #   f.write('#define '+var_name+' {')
+    # if(len(var_values.shape)>2): #convolution layer weights
+    #   transposed_wts = np.transpose(var_values,(3,0,1,2))
+    # else: #fully connected layer weights or biases of any layer
+    #   transposed_wts = np.transpose(var_values)
+    # with open('weights.h','a') as f:
+    #   transposed_wts.tofile(f,sep=", ",format="%d")
+    #   f.write('}\n')
     # convert back original range but quantized to 8-bits or 256 levels
     var_values = var_values/(2**dec_bits)
     # update the weights in tensorflow graph for quantizing the activations
@@ -122,38 +138,98 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
             ' dec bits: '+str(dec_bits)+\
             ' max: ('+str(var_values.max())+','+str(max_value)+')'+\
             ' min: ('+str(var_values.min())+','+str(min_value)+')')
-  
-  # training set
-  set_size = audio_processor.set_size('training')
-  tf.logging.info('set_size=%d', set_size)
-  total_accuracy = 0
-  total_conf_matrix = None
-  for i in xrange(0, set_size, FLAGS.batch_size):
-    training_fingerprints, training_ground_truth = (
-        audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
-                                 0.0, 0, 'training', sess))
-    training_accuracy, conf_matrix = sess.run(
-        [evaluation_step, confusion_matrix],
-        feed_dict={
-            fingerprint_input: training_fingerprints,
-            ground_truth_input: training_ground_truth,
-        })
-    batch_size = min(FLAGS.batch_size, set_size - i)
-    total_accuracy += (training_accuracy * batch_size) / set_size
-    if total_conf_matrix is None:
-      total_conf_matrix = conf_matrix
-    else:
-      total_conf_matrix += conf_matrix
-  tf.logging.info('Confusion Matrix:\n %s' % (total_conf_matrix))
-  tf.logging.info('Training accuracy = %.2f%% (N=%d)' %
-                  (total_accuracy * 100, set_size))
+
+  if FLAGS.if_retrain:
+    best_accuracy = 0
+    for training_step in range(FLAGS.retrain_steps):
+      # Pull the audio samples we'll use for training.
+      train_fingerprints, train_ground_truth = audio_processor.get_data(
+          FLAGS.batch_size, 0, model_settings, 0.8,
+          0.1, time_shift_samples, 'training', sess)
+      # Run the graph with this batch of training data.
+      train_summary, train_accuracy, cross_entropy_value, _ = sess.run(
+          [
+              merged, evaluation_step, cross_entropy_mean, train_step
+          ],
+          feed_dict={
+              fingerprint_input: train_fingerprints,
+              ground_truth_input: train_ground_truth
+          })
+      train_writer.add_summary(train_summary, training_step)
+      tf.logging.info('Step #%d: accuracy %.2f%%, cross entropy %f' %
+                      (training_step, train_accuracy * 100,
+                      cross_entropy_value))
+      is_last_step = (training_step == FLAGS.retrain_steps)
+      if (training_step % 200) == 0 or is_last_step:
+        set_size = audio_processor.set_size('validation')
+        total_accuracy = 0
+        total_conf_matrix = None
+        for i in range(0, set_size, FLAGS.batch_size):
+          validation_fingerprints, validation_ground_truth = (
+              audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
+                                      0.0, 0, 'validation', sess))
+
+          # Run a validation step and capture training summaries for TensorBoard
+          # with the `merged` op.
+          validation_summary, validation_accuracy, conf_matrix = sess.run(
+              [merged, evaluation_step, confusion_matrix],
+              feed_dict={
+                  fingerprint_input: validation_fingerprints,
+                  ground_truth_input: validation_ground_truth
+              })
+          validation_writer.add_summary(validation_summary, training_step)
+          batch_size = min(FLAGS.batch_size, set_size - i)
+          total_accuracy += (validation_accuracy * batch_size) / set_size
+          if total_conf_matrix is None:
+            total_conf_matrix = conf_matrix
+          else:
+            total_conf_matrix += conf_matrix
+        tf.logging.info('Confusion Matrix:\n %s' % (total_conf_matrix))
+        tf.logging.info('Step %d: Validation accuracy = %.2f%% (N=%d)' %
+                        (training_step, total_accuracy * 100, set_size))
+
+        # Save the model checkpoint when validation accuracy improves
+        if total_accuracy > best_accuracy:
+          best_accuracy = total_accuracy
+          checkpoint_path = os.path.join(FLAGS.new_checkpoint,
+                                        FLAGS.model_architecture + '_'+ str(int(best_accuracy*10000)) + '.ckpt')
+          tf.logging.info('Saving best model to "%s-%d"', checkpoint_path, training_step)
+          saver.save(sess, checkpoint_path, global_step=training_step)
+        tf.logging.info('So far the best validation accuracy is %.2f%%' % (best_accuracy*100))
+
+#   # training set
+#   set_size = audio_processor.set_size('training')
+#   tf.logging.info('set_size=%d', set_size)
+#   total_accuracy = 0
+#   total_conf_matrix = None
+#   # data range (-256,32)
+#   # todo add data norm.
+#   for i in range(0, set_size, FLAGS.batch_size):
+#     training_fingerprints, training_ground_truth = (
+#         audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
+#                                  0.0, 0, 'training', sess))
+#     training_accuracy, conf_matrix = sess.run(
+#         [evaluation_step, confusion_matrix],
+#         feed_dict={
+#             fingerprint_input: training_fingerprints,
+#             ground_truth_input: training_ground_truth,
+#         })
+#     batch_size = min(FLAGS.batch_size, set_size - i)
+#     total_accuracy += (training_accuracy * batch_size) / set_size
+#     if total_conf_matrix is None:
+#       total_conf_matrix = conf_matrix
+#     else:
+#       total_conf_matrix += conf_matrix
+#   tf.logging.info('Confusion Matrix:\n %s' % (total_conf_matrix))
+#   tf.logging.info('Training accuracy = %.2f%% (N=%d)' %
+#                   (total_accuracy * 100, set_size))
 
   # validation set
   set_size = audio_processor.set_size('validation')
   tf.logging.info('set_size=%d', set_size)
   total_accuracy = 0
   total_conf_matrix = None
-  for i in xrange(0, set_size, FLAGS.batch_size):
+  for i in range(0, set_size, FLAGS.batch_size):
     validation_fingerprints, validation_ground_truth = (
         audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
                                  0.0, 0, 'validation', sess))
@@ -178,7 +254,7 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
   tf.logging.info('set_size=%d', set_size)
   total_accuracy = 0
   total_conf_matrix = None
-  for i in xrange(0, set_size, FLAGS.batch_size):
+  for i in range(0, set_size, FLAGS.batch_size):
     test_fingerprints, test_ground_truth = audio_processor.get_data(
         FLAGS.batch_size, i, model_settings, 0.0, 0.0, 0, 'testing', sess)
     test_accuracy, conf_matrix = sess.run(
@@ -187,6 +263,8 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
             fingerprint_input: test_fingerprints,
             ground_truth_input: test_ground_truth,
         })
+    # test_writer.add_summary(summary, i)
+    
     batch_size = min(FLAGS.batch_size, set_size - i)
     total_accuracy += (test_accuracy * batch_size) / set_size
     if total_conf_matrix is None:
@@ -212,16 +290,21 @@ if __name__ == '__main__':
       '--data_url',
       type=str,
       # pylint: disable=line-too-long
-      default='http://download.tensorflow.org/data/speech_commands_v0.02.tar.gz',
+      default='',
       # pylint: enable=line-too-long
       help='Location of speech training data archive on the web.')
   parser.add_argument(
       '--data_dir',
       type=str,
-      default='/tmp/speech_dataset/',
+      default='./speech_dataset/',
       help="""\
       Where to download the speech training data to.
       """)
+  parser.add_argument(
+      '--summaries_dir',
+      type=str,
+      default='./quant/summary',
+      help='Where to save summary logs for TensorBoard.')
   parser.add_argument(
       '--silence_percentage',
       type=float,
@@ -269,7 +352,7 @@ if __name__ == '__main__':
   parser.add_argument(
       '--dct_coefficient_count',
       type=int,
-      default=40,
+      default=16,
       help='How many bins to use for the MFCC fingerprint',)
   parser.add_argument(
       '--batch_size',
@@ -282,6 +365,7 @@ if __name__ == '__main__':
       default='yes,no,up,down,left,right,on,off,stop,go',
       help='Words to use (others will be added to an unknown label)',)
   parser.add_argument(
+      # GIVE PATH LIKE ./train/ckpts/best/basic_lstm_9358.ckpt-16000
       '--checkpoint',
       type=str,
       default='',
@@ -289,20 +373,33 @@ if __name__ == '__main__':
   parser.add_argument(
       '--model_architecture',
       type=str,
-      default='dnn',
+      default='basic_lstm',
       help='What model architecture to use')
   parser.add_argument(
       '--model_size_info',
       type=int,
       nargs="+",
-      default=[128,128,128],
+      default=[128],
       help='Model dimensions - different for various models')
   parser.add_argument(
       '--act_max',
       type=float,
       nargs="+",
-      default=[128,128,128],
+      default=[32,16,32],
       help='activations max')
+  parser.add_argument(
+      '--if_retrain',
+      type=int,
+      default=0)
+  parser.add_argument(
+      '--retrain_steps',
+      type=int,
+      default=3000)    
+  parser.add_argument(
+      '--new_checkpoint',
+      type=str,
+      default='./quant/ckpts',
+      help='Directory to write event logs and checkpoint.')
 
   FLAGS, unparsed = parser.parse_known_args()
   tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)

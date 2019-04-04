@@ -93,7 +93,7 @@ def run_inference(wanted_words, sample_rate, clip_duration_ms,
   tf.logging.info('set_size=%d', set_size)
   total_accuracy = 0
   total_conf_matrix = None
-  for i in xrange(0, set_size, FLAGS.batch_size):
+  for i in range(0, set_size, FLAGS.batch_size):
     training_fingerprints, training_ground_truth = (
         audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
                                  0.0, 0, 'training', sess))
@@ -113,13 +113,12 @@ def run_inference(wanted_words, sample_rate, clip_duration_ms,
   tf.logging.info('Training accuracy = %.2f%% (N=%d)' %
                   (total_accuracy * 100, set_size))
 
-
   # validation set
   set_size = audio_processor.set_size('validation')
   tf.logging.info('set_size=%d', set_size)
   total_accuracy = 0
   total_conf_matrix = None
-  for i in xrange(0, set_size, FLAGS.batch_size):
+  for i in range(0, set_size, FLAGS.batch_size):
     validation_fingerprints, validation_ground_truth = (
         audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
                                  0.0, 0, 'validation', sess))
@@ -144,7 +143,7 @@ def run_inference(wanted_words, sample_rate, clip_duration_ms,
   tf.logging.info('set_size=%d', set_size)
   total_accuracy = 0
   total_conf_matrix = None
-  for i in xrange(0, set_size, FLAGS.batch_size):
+  for i in range(0, set_size, FLAGS.batch_size):
     test_fingerprints, test_ground_truth = audio_processor.get_data(
         FLAGS.batch_size, i, model_settings, 0.0, 0.0, 0, 'testing', sess)
     test_accuracy, conf_matrix = sess.run(
@@ -178,13 +177,13 @@ if __name__ == '__main__':
       '--data_url',
       type=str,
       # pylint: disable=line-too-long
-      default='http://download.tensorflow.org/data/speech_commands_v0.02.tar.gz',
+      default='',
       # pylint: enable=line-too-long
       help='Location of speech training data archive on the web.')
   parser.add_argument(
       '--data_dir',
       type=str,
-      default='/tmp/speech_dataset/',
+      default='speech_dataset/',
       help="""\
       Where to download the speech training data to.
       """)
@@ -235,7 +234,7 @@ if __name__ == '__main__':
   parser.add_argument(
       '--dct_coefficient_count',
       type=int,
-      default=40,
+      default=16,
       help='How many bins to use for the MFCC fingerprint',)
   parser.add_argument(
       '--batch_size',
@@ -255,13 +254,13 @@ if __name__ == '__main__':
   parser.add_argument(
       '--model_architecture',
       type=str,
-      default='dnn',
+      default='basic_lstm',
       help='What model architecture to use')
   parser.add_argument(
       '--model_size_info',
       type=int,
       nargs="+",
-      default=[128,128,128],
+      default=[128],
       help='Model dimensions - different for various models')
 
   FLAGS, unparsed = parser.parse_known_args()
