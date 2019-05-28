@@ -106,39 +106,59 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
   evaluation_step = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
   models.load_variables_from_checkpoint(sess, FLAGS.checkpoint)
 
-  # Quantize weights to 8-bits using (min,max) and write to file
-  f = open('weights.h','wb')
-  f.close()
-
   for v in tf.trainable_variables():
     var_name = str(v.name)
     var_values = sess.run(v)
     min_value = var_values.min()
     max_value = var_values.max()
     int_bits = int(np.ceil(np.log2(max(abs(min_value),abs(max_value)))))
+    # ap_fixed<8,1> uses 7 decimal bits and 1 bit for sign
     dec_bits = 7-int_bits
+    # dec_bits = min(7, 7-int_bits)
     # convert to [-128,128) or int8
-    var_values = np.round(var_values*2**dec_bits)
-    var_name = var_name.replace('/','_')
-    var_name = var_name.replace(':','_')
-    # with open('weights.h','a') as f:
-    #   f.write('#define '+var_name+' {')
-    # if(len(var_values.shape)>2): #convolution layer weights
-    #   transposed_wts = np.transpose(var_values,(3,0,1,2))
-    # else: #fully connected layer weights or biases of any layer
-    #   transposed_wts = np.transpose(var_values)
-    # with open('weights.h','a') as f:
-    #   transposed_wts.tofile(f,sep=", ",format="%d")
-    #   f.write('}\n')
+    # var_values = np.round(var_values*2**dec_bits)
     # convert back original range but quantized to 8-bits or 256 levels
-    var_values = var_values/(2**dec_bits)
+    # var_values = var_values/(2**dec_bits)
+    if FLAGS.update_weights:
+      # define datatypes
+      # f = open('weights/parameters.h','wb')
+      # f.close()
+      from save_data import prepare_header, prepare_lstm_headers
+      var_name_split = var_name.split(':')
+      if var_name_split[0].startswith('W_o'):
+        os.makedirs('weights/fc', exist_ok=True)
+        c_var_name = 'Wy['+str(var_values.shape[1]) + '][' +str(var_values.shape[0]) + ']' # transposed
+        np.savetxt('weights/fc/Wy.h', np.transpose(var_values), delimiter=',', newline=',\n')
+        prepare_header('weights/fc/Wy.h', 'Wy_t '+c_var_name)
+      elif var_name_split[0].startswith('b_o'):
+        c_var_name = 'by['+str(var_values.shape[0]) + ']'
+        np.savetxt('weights/fc/by.h', var_values[None], delimiter=',')
+        prepare_header('weights/fc/by.h','by_t '+c_var_name)
+
+      elif var_name_split[0].startswith('lstm'):
+        lstm_name = var_name_split[0].split('/')
+        param_name = lstm_name[-1]
+        # if (lstm_name[0] == 'lstm0'):
+        #   prepare_lstm_headers('weights/' + lstm_name[0], var_values,input_size = FLAGS.dct_coefficient_count, param_name=param_name)
+        # else: 
+        #   state_size = FLAGS.model_size_info[0] # TODO
+        #   prepare_lstm_headers('weights/' + lstm_name[0], var_values,input_size = state_size, param_name=param_name) 
+
+        # for lstmp
+        if (lstm_name[-2] == 'projection'):
+          param_name = 'projection'
+        if (lstm_name[1] == 'lstm0'):
+          prepare_lstm_headers('weights/' + lstm_name[1], var_values,input_size = FLAGS.dct_coefficient_count, param_name=param_name)
+        else: 
+          state_size = FLAGS.model_size_info[0] # TODO
+          prepare_lstm_headers('weights/' + lstm_name[1], var_values,input_size = state_size, param_name=param_name) 
+
     # update the weights in tensorflow graph for quantizing the activations
-    var_values = sess.run(tf.assign(v,var_values))
+    var_values = sess.run(tf.assign(v,var_values))    
     print(var_name+' number of wts/bias: '+str(var_values.shape)+\
             ' dec bits: '+str(dec_bits)+\
             ' max: ('+str(var_values.max())+','+str(max_value)+')'+\
             ' min: ('+str(var_values.min())+','+str(min_value)+')')
-
   if FLAGS.if_retrain:
     best_accuracy = 0
     for training_step in range(FLAGS.retrain_steps):
@@ -197,33 +217,6 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
           saver.save(sess, checkpoint_path, global_step=training_step)
         tf.logging.info('So far the best validation accuracy is %.2f%%' % (best_accuracy*100))
 
-#   # training set
-#   set_size = audio_processor.set_size('training')
-#   tf.logging.info('set_size=%d', set_size)
-#   total_accuracy = 0
-#   total_conf_matrix = None
-#   # data range (-256,32)
-#   # todo add data norm.
-#   for i in range(0, set_size, FLAGS.batch_size):
-#     training_fingerprints, training_ground_truth = (
-#         audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
-#                                  0.0, 0, 'training', sess))
-#     training_accuracy, conf_matrix = sess.run(
-#         [evaluation_step, confusion_matrix],
-#         feed_dict={
-#             fingerprint_input: training_fingerprints,
-#             ground_truth_input: training_ground_truth,
-#         })
-#     batch_size = min(FLAGS.batch_size, set_size - i)
-#     total_accuracy += (training_accuracy * batch_size) / set_size
-#     if total_conf_matrix is None:
-#       total_conf_matrix = conf_matrix
-#     else:
-#       total_conf_matrix += conf_matrix
-#   tf.logging.info('Confusion Matrix:\n %s' % (total_conf_matrix))
-#   tf.logging.info('Training accuracy = %.2f%% (N=%d)' %
-#                   (total_accuracy * 100, set_size))
-
   # validation set
   set_size = audio_processor.set_size('validation')
   tf.logging.info('set_size=%d', set_size)
@@ -257,13 +250,13 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
   for i in range(0, set_size, FLAGS.batch_size):
     test_fingerprints, test_ground_truth = audio_processor.get_data(
         FLAGS.batch_size, i, model_settings, 0.0, 0.0, 0, 'testing', sess)
+    
     test_accuracy, conf_matrix = sess.run(
         [evaluation_step, confusion_matrix],
         feed_dict={
             fingerprint_input: test_fingerprints,
             ground_truth_input: test_ground_truth,
         })
-    # test_writer.add_summary(summary, i)
     
     batch_size = min(FLAGS.batch_size, set_size - i)
     total_accuracy += (test_accuracy * batch_size) / set_size
@@ -271,6 +264,7 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
       total_conf_matrix = conf_matrix
     else:
       total_conf_matrix += conf_matrix
+
   tf.logging.info('Confusion Matrix:\n %s' % (total_conf_matrix))
   tf.logging.info('Test accuracy = %.2f%% (N=%d)' % (total_accuracy * 100,
                                                            set_size))
@@ -385,7 +379,7 @@ if __name__ == '__main__':
       '--act_max',
       type=float,
       nargs="+",
-      default=[32,16,32],
+      default=[32,32],
       help='activations max')
   parser.add_argument(
       '--if_retrain',
@@ -400,6 +394,7 @@ if __name__ == '__main__':
       type=str,
       default='./quant/ckpts',
       help='Directory to write event logs and checkpoint.')
+  parser.add_argument('--update_weights', type=int, default=0)       
 
   FLAGS, unparsed = parser.parse_known_args()
   tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)

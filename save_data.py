@@ -31,25 +31,72 @@ import tensorflow as tf
 import input_data
 import models
 
+import numpy as np
+import os
+
+
+def prepare_header(filename,definition):
+  data = definition + '={'
+  with open(filename) as f:
+      data = data + f.read()+'};'
+  with open(filename, 'w+') as f:
+          f.write(data)
+def prepare_lstm_headers(folder, var_values, input_size = None, param_name=None):
+  os.makedirs(folder, exist_ok=True)
+  if param_name == 'bias': # bias (i, j, f, o)
+    bias_size = int(var_values.shape[0]/4)
+    np.savetxt(folder + '/bi.h', var_values[:bias_size][None], delimiter=',')
+    np.savetxt(folder + '/bc.h', var_values[bias_size:2*bias_size][None], delimiter=',')
+    np.savetxt(folder + '/bf.h', var_values[2*bias_size:3*bias_size][None], delimiter=',')
+    np.savetxt(folder + '/bo.h', var_values[3*bias_size:][None], delimiter=',')
+    prepare_header(folder + '/bi.h','bias_t bi['+str(bias_size)+']')
+    prepare_header(folder + '/bc.h','bias_t bc['+str(bias_size)+']')
+    prepare_header(folder + '/bf.h','bias_t bf['+str(bias_size)+']')
+    prepare_header(folder + '/bo.h','bias_t bo['+str(bias_size)+']')
+  elif param_name == 'projection': # kernel  
+    np.savetxt(folder + '/proj.h', np.transpose(var_values), delimiter=',',newline=',\n')
+    prepare_header(folder + '/proj.h','proj_t proj['+str(var_values.shape[1])+']'+'['+str(var_values.shape[0])+']')
+  elif param_name == 'kernel': # kernel  
+    hidden_size = int(var_values.shape[1]/4)
+    if not input_size:
+      input_size = hidden_size
+    W_values = var_values[:input_size] # (mfcc,516)
+    U_values = var_values[input_size:] # (128, 516)
+    second_input_size = var_values.shape[0] - input_size
+    W_size = '[' + str(hidden_size) + '][' + str(input_size) + ']'
+    U_size = '[' + str(hidden_size) + '][' + str(second_input_size) + ']'
+    W_transpose = np.transpose(W_values)
+    U_transpose = np.transpose(U_values)
+    # slicing
+    Wi = W_transpose[:hidden_size]
+    Wc = W_transpose[hidden_size:2*hidden_size]
+    Wf = W_transpose[hidden_size*2:hidden_size*3]
+    Wo = W_transpose[hidden_size*3:]
+    Ui = U_transpose[:hidden_size]
+    Uc = U_transpose[hidden_size:2*hidden_size]
+    Uf = U_transpose[hidden_size*2:hidden_size*3]
+    Uo = U_transpose[hidden_size*3:]
+    # save to txt
+    np.savetxt(folder + '/Wi.h', Wi, delimiter=',',newline=',\n')
+    np.savetxt(folder + '/Wc.h', Wc, delimiter=',',newline=',\n')
+    np.savetxt(folder + '/Wf.h', Wf, delimiter=',',newline=',\n')
+    np.savetxt(folder + '/Wo.h', Wo, delimiter=',',newline=',\n')
+    np.savetxt(folder + '/Ui.h', Ui, delimiter=',',newline=',\n')
+    np.savetxt(folder + '/Uc.h', Uc, delimiter=',',newline=',\n')
+    np.savetxt(folder + '/Uf.h', Uf, delimiter=',',newline=',\n')
+    np.savetxt(folder + '/Uo.h', Uo, delimiter=',',newline=',\n')
+    prepare_header(folder + '/Wi.h','kernel_t Wi'+W_size)
+    prepare_header(folder + '/Wc.h','kernel_t Wc'+W_size)
+    prepare_header(folder + '/Wf.h','kernel_t Wf'+W_size)
+    prepare_header(folder + '/Wo.h','kernel_t Wo'+W_size)
+    prepare_header(folder + '/Ui.h','kernel_t Ui'+U_size)
+    prepare_header(folder + '/Uc.h','kernel_t Uc'+U_size)
+    prepare_header(folder + '/Uf.h','kernel_t Uf'+U_size)
+    prepare_header(folder + '/Uo.h','kernel_t Uo'+U_size)
 
 def run_inference(wanted_words, sample_rate, clip_duration_ms,
                            window_size_ms, window_stride_ms, dct_coefficient_count, 
                            model_architecture, model_size_info):
-  """Creates an audio model with the nodes needed for inference.
-
-  Uses the supplied arguments to create a model, and inserts the input and
-  output nodes that are needed to use the graph for inference.
-
-  Args:
-    wanted_words: Comma-separated list of the words we're trying to recognize.
-    sample_rate: How many samples per second are in the input audio files.
-    clip_duration_ms: How many samples to analyze for the audio pattern.
-    window_size_ms: Time slice duration to estimate frequencies from.
-    window_stride_ms: How far apart time slices should be.
-    dct_coefficient_count: Number of frequency bands to analyze.
-    model_architecture: Name of the kind of model to generate.
-    model_size_info: Model dimensions : different lengths for different models
-  """
   
   tf.logging.set_verbosity(tf.logging.INFO)
   sess = tf.InteractiveSession()
@@ -63,104 +110,35 @@ def run_inference(wanted_words, sample_rate, clip_duration_ms,
       FLAGS.unknown_percentage,
       FLAGS.wanted_words.split(','), FLAGS.validation_percentage,
       FLAGS.testing_percentage, model_settings)
-  
-  label_count = model_settings['label_count']
-  fingerprint_size = model_settings['fingerprint_size']
-
-  fingerprint_input = tf.placeholder(
-      tf.float32, [None, fingerprint_size], name='fingerprint_input')
-
-  logits = models.create_model(
-      fingerprint_input,
-      model_settings,
-      FLAGS.model_architecture,
-      FLAGS.model_size_info,
-      is_training=False)
-
-  ground_truth_input = tf.placeholder(
-      tf.float32, [None, label_count], name='groundtruth_input')
-
-  predicted_indices = tf.argmax(logits, 1)
-  expected_indices = tf.argmax(ground_truth_input, 1)
-  correct_prediction = tf.equal(predicted_indices, expected_indices)
-  confusion_matrix = tf.confusion_matrix(
-      expected_indices, predicted_indices, num_classes=label_count)
-  evaluation_step = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-  models.load_variables_from_checkpoint(sess, FLAGS.checkpoint)
 
   # training set
-#   set_size = audio_processor.set_size('training')
-#   tf.logging.info('set_size=%d', set_size)
-#   total_accuracy = 0
-#   total_conf_matrix = None
-#   for i in range(0, set_size, FLAGS.batch_size):
-#     training_fingerprints, training_ground_truth = (
-#         audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
-#                                  0.0, 0, 'training', sess))
-#     training_accuracy, conf_matrix = sess.run(
-#         [evaluation_step, confusion_matrix],
-#         feed_dict={
-#             fingerprint_input: training_fingerprints,
-#             ground_truth_input: training_ground_truth,
-#         })
-#     batch_size = min(FLAGS.batch_size, set_size - i)
-#     total_accuracy += (training_accuracy * batch_size) / set_size
-#     if total_conf_matrix is None:
-#       total_conf_matrix = conf_matrix
-#     else:
-#       total_conf_matrix += conf_matrix
-#   tf.logging.info('Confusion Matrix:\n %s' % (total_conf_matrix))
-#   tf.logging.info('Training accuracy = %.2f%% (N=%d)' %
-#                   (total_accuracy * 100, set_size))
+#   time_shift_samples = int((FLAGS.time_shift_ms * FLAGS.sample_rate) / 1000)
+#   train_fingerprints, train_ground_truth = audio_processor.get_data(
+#         audio_processor.set_size('training'), 0, model_settings, FLAGS.background_frequency,
+#         FLAGS.background_volume, time_shift_samples, 'training', sess)
+#   print(np.max(train_fingerprints), np.min(train_fingerprints))
+#   print(np.std(train_fingerprints), np.mean(train_fingerprints))
 
-  # validation set
-  set_size = audio_processor.set_size('validation')
-  tf.logging.info('set_size=%d', set_size)
-  total_accuracy = 0
-  total_conf_matrix = None
-  for i in range(0, set_size, FLAGS.batch_size):
-    validation_fingerprints, validation_ground_truth = (
-        audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
-                                 0.0, 0, 'validation', sess))
-    validation_accuracy, conf_matrix = sess.run(
-        [evaluation_step, confusion_matrix],
-        feed_dict={
-            fingerprint_input: validation_fingerprints,
-            ground_truth_input: validation_ground_truth,
-        })
-    batch_size = min(FLAGS.batch_size, set_size - i)
-    total_accuracy += (validation_accuracy * batch_size) / set_size
-    if total_conf_matrix is None:
-      total_conf_matrix = conf_matrix
-    else:
-      total_conf_matrix += conf_matrix
-  tf.logging.info('Confusion Matrix:\n %s' % (total_conf_matrix))
-  tf.logging.info('Validation accuracy = %.2f%% (N=%d)' %
-                  (total_accuracy * 100, set_size))
-  
   # test set
   set_size = audio_processor.set_size('testing')
   tf.logging.info('set_size=%d', set_size)
-  total_accuracy = 0
-  total_conf_matrix = None
-  for i in range(0, set_size, FLAGS.batch_size):
-    test_fingerprints, test_ground_truth = audio_processor.get_data(
-        FLAGS.batch_size, i, model_settings, 0.0, 0.0, 0, 'testing', sess)
-    test_accuracy, conf_matrix = sess.run(
-        [evaluation_step, confusion_matrix],
-        feed_dict={
-            fingerprint_input: test_fingerprints,
-            ground_truth_input: test_ground_truth,
-        })
-    batch_size = min(FLAGS.batch_size, set_size - i)
-    total_accuracy += (test_accuracy * batch_size) / set_size
-    if total_conf_matrix is None:
-      total_conf_matrix = conf_matrix
-    else:
-      total_conf_matrix += conf_matrix
-  tf.logging.info('Confusion Matrix:\n %s' % (total_conf_matrix))
-  tf.logging.info('Test accuracy = %.2f%% (N=%d)' % (total_accuracy * 100,
-                                                           set_size))
+
+  test_fingerprints, test_ground_truth = audio_processor.get_data(
+      set_size, 0, model_settings, 0.0, 0.0, 0, 'testing', sess)
+
+#   print(np.max(test_fingerprints), np.min(test_fingerprints))
+  test_std = np.std(test_fingerprints, axis=1)
+  test_mean = np.mean(test_fingerprints,axis=1)
+  feat_len = test_fingerprints.shape[1]  
+  test_std = np.array([test_std,]*feat_len).transpose()
+  test_mean = np.array([test_mean,]*feat_len).transpose()
+#   print(test_fingerprints)
+  test_norm = (test_fingerprints-test_std)/test_mean
+#   print(min(test_norm[0]),max(test_norm[0]))
+  
+
+  #for ii in range(set_size):
+  #  np.savetxt('test_data/'+str(ii)+'.txt',test_fingerprints[ii], newline=' ', header=str(np.argmax(test_ground_truth[ii])))
 
 def main(_):
 
@@ -173,6 +151,27 @@ def main(_):
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
+  parser.add_argument(
+      '--time_shift_ms',
+      type=float,
+      default=100.0,
+      help="""\
+      Range to randomly shift the training audio by in time.
+      """)
+  parser.add_argument(
+      '--background_volume',
+      type=float,
+      default=0.1,
+      help="""\
+      How loud the background noise should be, between 0 and 1.
+      """)
+  parser.add_argument(
+      '--background_frequency',
+      type=float,
+      default=0.8,
+      help="""\
+      How many of the training samples have background noise mixed in.
+      """)
   parser.add_argument(
       '--data_url',
       type=str,

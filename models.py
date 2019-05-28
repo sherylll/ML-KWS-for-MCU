@@ -769,6 +769,7 @@ def create_basic_lstm_model(fingerprint_input, model_settings, model_size_info,
   flow = tf.unstack(fingerprint_4d, input_time_size, axis=1) # required by static_rnn
   num_classes = model_settings['label_count']
   # flow = fingerprint_4d
+  print("model size: ", model_size_info)
   if type(model_size_info) is list:
     LSTM_units = model_size_info
   else:
@@ -776,7 +777,9 @@ def create_basic_lstm_model(fingerprint_input, model_settings, model_size_info,
   num_layers = len(model_size_info)  
   with tf.name_scope('LSTM-Layer'):
     for i in range(num_layers):
-      lstmcell = tf.nn.rnn_cell.BasicLSTMCell(LSTM_units[i], forget_bias=0)
+      lstmcell = tf.nn.rnn_cell.BasicLSTMCell(LSTM_units[i], forget_bias=0) 
+      # if is_training:
+        # lstmcell = tf.nn.rnn_cell.DropoutWrapper(lstmcell, input_keep_prob=0.9)
       flow, [_, flow_t]= tf.nn.static_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
 
   with tf.name_scope('Output-Layer'):
@@ -803,6 +806,8 @@ def create_lstm_model(fingerprint_input, model_settings, model_size_info,
   input_time_size = model_settings['spectrogram_length']
   fingerprint_4d = tf.reshape(fingerprint_input,
                               [-1, input_time_size, input_frequency_size])
+  # tf.summary.histogram('fingerprint_4d', fingerprint_4d)
+  
   flow = tf.unstack(fingerprint_4d, input_time_size, axis=1) # required by static_rnn
   num_classes = model_settings['label_count']
   projection_units = model_size_info[0]
@@ -813,7 +818,7 @@ def create_lstm_model(fingerprint_input, model_settings, model_size_info,
   with tf.name_scope('LSTM-Layer'):
     with tf.variable_scope("lstm"): 
       for i in range(num_layers):
-        lstmcell = tf.nn.rnn_cell.LSTMCell(LSTM_units, forget_bias=0,num_proj=projection_units)
+        lstmcell = tf.nn.rnn_cell.LSTMCell(LSTM_units, forget_bias=0,num_proj=projection_units, cell_clip = 1.0, proj_clip = 1.0)
         flow, [_, flow_t]= tf.nn.static_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
 
   with tf.name_scope('Output-Layer'):
@@ -1005,44 +1010,24 @@ def create_crnn_model(fingerprint_input, model_settings,
       (input_time_size - first_filter_height + first_filter_stride_y) /
       first_filter_stride_y))
 
-  # GRU part
   num_rnn_layers = model_size_info[5]
   RNN_units = model_size_info[6]
   flow = tf.reshape(first_dropout, [-1, first_conv_output_height, 
            first_conv_output_width * first_filter_count])
-  cell_fw = []
-  cell_bw = []
-  if layer_norm:
-    for i in range(num_rnn_layers):
-      cell_fw.append(LayerNormGRUCell(RNN_units))
-      if bidirectional:
-        cell_bw.append(LayerNormGRUCell(RNN_units))
-  else:
-    for i in range(num_rnn_layers):
-      cell_fw.append(tf.contrib.rnn.GRUCell(RNN_units))
-      if bidirectional:
-        cell_bw.append(tf.contrib.rnn.GRUCell(RNN_units))
+  flow = tf.unstack(flow, first_conv_output_height, axis=1) # required by static_rnn
 
-  if bidirectional:
-    outputs, output_state_fw, output_state_bw = \
-      tf.contrib.rnn.stack_bidirectional_dynamic_rnn(cell_fw, cell_bw, flow, 
-      dtype=tf.float32)
-    flow_dim = first_conv_output_height*RNN_units*2
-    flow = tf.reshape(outputs, [-1, flow_dim])
-  else:
-    cells = tf.contrib.rnn.MultiRNNCell(cell_fw)
-    _, last = tf.nn.dynamic_rnn(cell=cells, inputs=flow, dtype=tf.float32)
-    flow_dim = RNN_units
-    flow = last[-1]
-
+  for i in range(num_rnn_layers):
+    lstmcell = tf.nn.rnn_cell.BasicLSTMCell(RNN_units, forget_bias=0)
+    flow, [_, flow_t]= tf.nn.static_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
+  
+  flow_dim = RNN_units
   first_fc_output_channels = model_size_info[7]
-
   first_fc_weights = tf.get_variable('fcw', shape=[flow_dim, 
     first_fc_output_channels], 
     initializer=tf.contrib.layers.xavier_initializer())
   
   first_fc_bias = tf.Variable(tf.zeros([first_fc_output_channels]))
-  first_fc = tf.nn.relu(tf.matmul(flow, first_fc_weights) + first_fc_bias)
+  first_fc = tf.nn.relu(tf.matmul(flow_t, first_fc_weights) + first_fc_bias)
   if is_training:
     final_fc_input = tf.nn.dropout(first_fc, dropout_prob)
   else:

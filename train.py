@@ -224,6 +224,12 @@ def main(_):
     train_fingerprints, train_ground_truth = audio_processor.get_data(
         FLAGS.batch_size, 0, model_settings, FLAGS.background_frequency,
         FLAGS.background_volume, time_shift_samples, 'training', sess)
+    
+    # train_std = 11.558333964158848 
+    # train_mean = -1.5683672671004598
+    # train_fingerprints = (train_fingerprints - train_mean)/train_std
+    # train_fingerprints += 1
+    
     # Run the graph with this batch of training data.
     train_summary, train_accuracy, cross_entropy_value, _, _ = sess.run(
         [
@@ -249,7 +255,9 @@ def main(_):
         validation_fingerprints, validation_ground_truth = (
             audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
                                      0.0, 0, 'validation', sess))
-
+        # val_std = 20.91701306351207 
+        # val_mean = -3.0561562801250295
+        # validation_fingerprints = (validation_fingerprints - val_mean)/val_std
         # Run a validation step and capture training summaries for TensorBoard
         # with the `merged` op.
         validation_summary, validation_accuracy, conf_matrix = sess.run(

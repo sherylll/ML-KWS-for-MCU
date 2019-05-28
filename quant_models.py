@@ -123,6 +123,8 @@ def create_model(fingerprint_input, model_settings, model_architecture,
   elif model_architecture == 'ds_cnn':
     return create_ds_cnn_model(fingerprint_input, model_settings, 
                                  model_size_info, act_max, is_training)
+  elif model_architecture == 'crnn':
+    return create_crnn_model(fingerprint_input, model_settings, model_size_info, act_max, is_training)
   else:
     raise Exception('model_architecture argument "' + model_architecture +
                     '" not recognized, should be one of "single_fc", "conv",' +
@@ -376,6 +378,10 @@ class BasicLSTMCell(tf.nn.rnn_cell.BasicLSTMCell):
     else:
       c, h = array_ops.split(value=state, num_or_size_splits=2, axis=one)
 
+    # force quantizing params (no effects?)
+    self._kernel = fake_quant(self._kernel, 1, NUM_BITS)
+    self._bias = fake_quant(self._bias, 1, NUM_BITS)
+
     gate_inputs = math_ops.matmul(
         array_ops.concat([inputs, h], 1), self._kernel)
     gate_inputs = nn_ops.bias_add(gate_inputs, self._bias)
@@ -437,11 +443,13 @@ def create_basic_lstm_model(fingerprint_input, model_settings, model_size_info,
   fingerprint_4d = tf.reshape(fingerprint_input,
                               [-1, input_time_size, input_frequency_size])
   
-  flow = fake_quant(fingerprint_4d, act_max[0], 8)  
-  flow = tf.unstack(fingerprint_4d, input_time_size, axis=1) # required by static_rnn
+  flow = fake_quant(fingerprint_4d, 16, 8)  
+  flow = tf.unstack(flow, input_time_size, axis=1) # required by static_rnn
 
   num_classes = model_settings['label_count']
   # flow = fingerprint_4d
+  print(".........................")
+  print(model_size_info, type(model_size_info))
   if type(model_size_info) is list:
     LSTM_units = model_size_info
   else:
@@ -454,7 +462,7 @@ def create_basic_lstm_model(fingerprint_input, model_settings, model_size_info,
       lstmcell = BasicLSTMCell(LSTM_units[i], forget_bias=0)
       flow, [_, flow_t]= tf.nn.static_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
       # tf.summary.histogram('h_state', flow)
-      flow_t = fake_quant(flow_t, act_max[i+1], 8)
+      # flow_t = fake_quant(flow_t, act_max[i+1], 8)
 
   with tf.name_scope('Output-Layer'):
     W_o = tf.get_variable('W_o', shape=[LSTM_units[-1], num_classes], 
@@ -463,7 +471,7 @@ def create_basic_lstm_model(fingerprint_input, model_settings, model_size_info,
     logits = tf.matmul(flow_t, W_o) + b_o
     # tf.summary.histogram('logits', logits)
 
-    logits = fake_quant(logits, act_max[num_layers+1], 8)
+    logits = fake_quant(logits, 8, 8)
 
   if is_training:
     return logits, dropout_prob
@@ -471,7 +479,7 @@ def create_basic_lstm_model(fingerprint_input, model_settings, model_size_info,
     return logits
 
 class LSTMCell(tf.nn.rnn_cell.LSTMCell):
-  def call(self, inputs, state, gate_range=8, proj_bits=8, num_bits=8):
+  def call(self, inputs, state, gate_range=8, proj_bits=4, num_bits=4):
     """ quantized version of lstm cell with projection layer and w/o peephole
     """
     num_proj = self._num_units if self._num_proj is None else self._num_proj
@@ -483,10 +491,13 @@ class LSTMCell(tf.nn.rnn_cell.LSTMCell):
       c_prev = array_ops.slice(state, [0, 0], [-1, self._num_units])
       m_prev = array_ops.slice(state, [0, self._num_units], [-1, num_proj])
 
-    c_prev = fake_quant(c_prev, gate_range, num_bits)
-    m_prev = fake_quant(m_prev, gate_range, proj_bits)
+    # c_prev = fake_quant(c_prev, gate_range, num_bits)
+    # m_prev = fake_quant(m_prev, gate_range, proj_bits)
 
     # i = input_gate, j = new_input, f = forget_gate, o = output_gate
+    self._kernel = fake_quant(self._kernel, 1, 4)
+    self._bias = fake_quant(self._bias, 1, 4)
+
     lstm_matrix = math_ops.matmul(
         array_ops.concat([inputs, m_prev], 1), self._kernel)
     lstm_matrix = nn_ops.bias_add(lstm_matrix, self._bias)
@@ -505,11 +516,12 @@ class LSTMCell(tf.nn.rnn_cell.LSTMCell):
     o = fake_quant(o, gate_range, num_bits)
 
     # Diagonal connections
-    c1 = sigmoid(f + self._forget_bias) * c_prev
-    c1 = fake_quant(c1, gate_range, num_bits)
-    c2 = sigmoid(i) * self._activation(j)
-    c2 = fake_quant(c2, gate_range, num_bits)
+    fsig = fake_quant(sigmoid(f + self._forget_bias), 1, num_bits) 
+    c1 = fake_quant(fsig * c_prev, 1, num_bits)
+    isig = fake_quant(sigmoid(i), 1, num_bits) 
+    c2 = fake_quant(isig * self._activation(j), 1, num_bits)
     c = c1 + c2
+    c = fake_quant(c, 1, num_bits)
 
     # TODO: test effects of clipping
     if self._cell_clip is not None:
@@ -517,10 +529,11 @@ class LSTMCell(tf.nn.rnn_cell.LSTMCell):
       c = clip_ops.clip_by_value(c, -self._cell_clip, self._cell_clip)
       # pylint: enable=invalid-unary-operand-type
 
-    m = sigmoid(o) * self._activation(c)
-    m = fake_quant(m, gate_range, proj_bits)
+    osig = fake_quant(sigmoid(o), 1, num_bits) 
+    m = fake_quant(osig * self._activation(c), 1, proj_bits)
 
     m = math_ops.matmul(m, self._proj_kernel)
+    m = fake_quant(m, 1, num_bits)
 
     if self._proj_clip is not None:
       # pylint: disable=invalid-unary-operand-type
@@ -539,8 +552,10 @@ def create_lstm_model(fingerprint_input, model_settings, model_size_info, act_ma
   input_time_size = model_settings['spectrogram_length']
   fingerprint_4d = tf.reshape(fingerprint_input,
                               [-1, input_time_size, input_frequency_size])
-  flow = fake_quant(fingerprint_4d, act_max[0], 8)    
-  flow = tf.unstack(fingerprint_4d, input_time_size, axis=1) # required by static_rnn
+  # tf.summary.histogram('fingerprint_4d', fingerprint_4d)
+
+  flow = fake_quant(fingerprint_4d, act_max[0], 8)
+  flow = tf.unstack(flow, input_time_size, axis=1) # required by static_rnn
   num_classes = model_settings['label_count']
   projection_units = model_size_info[0]
   LSTM_units = model_size_info[1]
@@ -549,17 +564,104 @@ def create_lstm_model(fingerprint_input, model_settings, model_size_info, act_ma
   with tf.name_scope('LSTM-Layer'):
     with tf.variable_scope("lstm"): 
       for i in range(num_layers):
-        lstmcell = LSTMCell(LSTM_units, forget_bias=0,num_proj=projection_units)
+        lstmcell = LSTMCell(LSTM_units, forget_bias=0,num_proj=projection_units, cell_clip = 1.0, proj_clip = 1.0)
         flow, [_, flow_t]= tf.nn.static_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
 
   with tf.name_scope('Output-Layer'):
     W_o = tf.get_variable('W_o', shape=[projection_units, num_classes], 
             initializer=tf.contrib.layers.xavier_initializer())
     b_o = tf.get_variable('b_o', shape=[num_classes])
+    W_o = fake_quant(W_o, 1, 4)
+    b_o = fake_quant(b_o, 1, 4)
     logits = tf.matmul(flow_t, W_o) + b_o
     # logits = fake_quant(logits, act_max[num_layers+1], 8)
-    logits = fake_quant(logits, 32, 8)
+    logits = fake_quant(logits, 8, 4)
   if is_training:
     return logits, dropout_prob
   else:
     return logits
+
+def create_crnn_model(fingerprint_input, model_settings, 
+                                  model_size_info, act_max, is_training):
+  if is_training:
+    dropout_prob = tf.placeholder(tf.float32, name='dropout_prob')
+  input_frequency_size = model_settings['dct_coefficient_count']
+  input_time_size = model_settings['spectrogram_length']
+  fingerprint_4d = tf.reshape(fingerprint_input,
+                              [-1, input_time_size, input_frequency_size, 1])
+  flow = fake_quant(fingerprint_4d, act_max[0], 8)    
+
+  # CNN part
+  first_filter_count = model_size_info[0]
+  first_filter_height = model_size_info[1]
+  first_filter_width = model_size_info[2]
+  first_filter_stride_y = model_size_info[3]
+  first_filter_stride_x = model_size_info[4]
+
+  first_weights = tf.get_variable('W', shape=[first_filter_height, 
+                    first_filter_width, 1, first_filter_count])
+
+  first_bias = tf.Variable(tf.zeros([first_filter_count]))
+  first_conv = tf.nn.conv2d(flow, first_weights, [
+      1, first_filter_stride_y, first_filter_stride_x, 1
+  ], 'VALID') + first_bias
+  first_relu = tf.nn.relu(first_conv)
+
+  fake_quant(first_relu, 16, 8)
+  tf.summary.histogram('relu_out', first_relu) 
+
+  if is_training:
+    first_dropout = tf.nn.dropout(first_relu, dropout_prob)
+  else:
+    first_dropout = first_relu
+  first_conv_output_width = int(math.floor(
+      (input_frequency_size - first_filter_width + first_filter_stride_x) /
+      first_filter_stride_x))
+  first_conv_output_height = int(math.floor(
+      (input_time_size - first_filter_height + first_filter_stride_y) /
+      first_filter_stride_y))
+
+  num_rnn_layers = model_size_info[5]
+  RNN_units = model_size_info[6]
+  flow = tf.reshape(first_dropout, [-1, first_conv_output_height, 
+           first_conv_output_width * first_filter_count])
+  flow = tf.unstack(flow, first_conv_output_height, axis=1) # required by static_rnn
+
+  for i in range(num_rnn_layers):
+    lstmcell = BasicLSTMCell(RNN_units, forget_bias=0)
+    flow, [_, flow_t]= tf.nn.static_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
+  # Quant. done in LSTMCell
+  tf.summary.histogram('all_hstates', flow) 
+
+  flow_dim = RNN_units
+  first_fc_output_channels = model_size_info[7]
+  first_fc_weights = tf.get_variable('fcw', shape=[flow_dim, 
+    first_fc_output_channels])
+  
+  first_fc_bias = tf.Variable(tf.zeros([first_fc_output_channels]))
+  first_fc = tf.nn.relu(tf.matmul(flow_t, first_fc_weights) + first_fc_bias)
+
+  fake_quant(first_fc, 8, 4)
+  tf.summary.histogram('first_fc', first_fc) 
+
+  if is_training:
+    final_fc_input = tf.nn.dropout(first_fc, dropout_prob)
+  else:
+    final_fc_input = first_fc
+
+  label_count = model_settings['label_count']
+  
+  final_fc_weights = tf.Variable(
+      tf.truncated_normal(
+          [first_fc_output_channels, label_count], stddev=0.01))
+
+  final_fc_bias = tf.Variable(tf.zeros([label_count]))
+  final_fc = tf.matmul(final_fc_input, final_fc_weights) + final_fc_bias
+
+  fake_quant(first_fc, 16, 4)  
+  tf.summary.histogram('final_fc', final_fc) 
+
+  if is_training:
+    return final_fc, dropout_prob
+  else:
+    return final_fc    

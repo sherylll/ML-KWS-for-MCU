@@ -383,7 +383,7 @@ class AudioProcessor(object):
         spectrogram,
         wav_decoder.sample_rate,
         dct_coefficient_count=model_settings['dct_coefficient_count'])
-
+        
   def set_size(self, mode):
     """Calculates the number of samples in the dataset partition.
 
