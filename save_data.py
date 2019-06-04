@@ -33,6 +33,7 @@ import models
 
 import numpy as np
 import os
+import matplotlib.pyplot as plt
 
 
 def prepare_header(filename,definition):
@@ -111,35 +112,23 @@ def run_inference(wanted_words, sample_rate, clip_duration_ms,
       FLAGS.wanted_words.split(','), FLAGS.validation_percentage,
       FLAGS.testing_percentage, model_settings)
 
-  # training set
-#   time_shift_samples = int((FLAGS.time_shift_ms * FLAGS.sample_rate) / 1000)
-#   train_fingerprints, train_ground_truth = audio_processor.get_data(
-#         audio_processor.set_size('training'), 0, model_settings, FLAGS.background_frequency,
-#         FLAGS.background_volume, time_shift_samples, 'training', sess)
-#   print(np.max(train_fingerprints), np.min(train_fingerprints))
-#   print(np.std(train_fingerprints), np.mean(train_fingerprints))
-
   # test set
   set_size = audio_processor.set_size('testing')
   tf.logging.info('set_size=%d', set_size)
 
   test_fingerprints, test_ground_truth = audio_processor.get_data(
-      set_size, 0, model_settings, 0.0, 0.0, 0, 'testing', sess)
-
-#   print(np.max(test_fingerprints), np.min(test_fingerprints))
-  test_std = np.std(test_fingerprints, axis=1)
-  test_mean = np.mean(test_fingerprints,axis=1)
-  feat_len = test_fingerprints.shape[1]  
-  test_std = np.array([test_std,]*feat_len).transpose()
-  test_mean = np.array([test_mean,]*feat_len).transpose()
-#   print(test_fingerprints)
-  test_norm = (test_fingerprints-test_std)/test_mean
-#   print(min(test_norm[0]),max(test_norm[0]))
-  
-
+      set_size, 0, model_settings, 0.0, 0.0, 0, 'testing', sess, debugging=True, wav_path="speech_dataset\\up\\0a2b400e_nohash_0.wav")
   #for ii in range(set_size):
   #  np.savetxt('test_data/'+str(ii)+'.txt',test_fingerprints[ii], newline=' ', header=str(np.argmax(test_ground_truth[ii])))
 
+  print(test_fingerprints)
+#   reshaped_fingerprints = test_fingerprints.reshape((98,16)).transpose()
+#   x = np.linspace(0, 98, 98)
+#   for i in range(16):
+    #   plt.plot(x, reshaped_fingerprints[i])
+#   plt.xlabel('time step')
+#   plt.ylabel('MFCC coeff.')
+#   plt.show()
 def main(_):
 
   # Create the model, load weights from checkpoint and run on train/val/test

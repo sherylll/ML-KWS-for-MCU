@@ -61,10 +61,13 @@ def prepare_model_settings(label_count, sample_rate, clip_duration_ms,
   if length_minus_window < 0:
     spectrogram_length = 0
   else:
-    spectrogram_length = 1 + int(length_minus_window / window_stride_samples)
+    spectrogram_length = int(desired_samples/window_stride_samples)
+    # spectrogram_length = 1 + int(length_minus_window / window_stride_samples)
   fingerprint_size = dct_coefficient_count * spectrogram_length
   return {
       'desired_samples': desired_samples,
+      'window_s': window_size_ms/1000.0,
+      'stride_s': window_stride_ms/1000.0,
       'window_size_samples': window_size_samples,
       'window_stride_samples': window_stride_samples,
       'spectrogram_length': spectrogram_length,
@@ -808,7 +811,8 @@ def create_lstm_model(fingerprint_input, model_settings, model_size_info,
                               [-1, input_time_size, input_frequency_size])
   # tf.summary.histogram('fingerprint_4d', fingerprint_4d)
   
-  flow = tf.unstack(fingerprint_4d, input_time_size, axis=1) # required by static_rnn
+  flow = fingerprint_4d
+  # flow = tf.unstack(fingerprint_4d, input_time_size, axis=1) # required by static_rnn
   num_classes = model_settings['label_count']
   projection_units = model_size_info[0]
   LSTM_units = model_size_info[1]
@@ -819,7 +823,8 @@ def create_lstm_model(fingerprint_input, model_settings, model_size_info,
     with tf.variable_scope("lstm"): 
       for i in range(num_layers):
         lstmcell = tf.nn.rnn_cell.LSTMCell(LSTM_units, forget_bias=0,num_proj=projection_units, cell_clip = 1.0, proj_clip = 1.0)
-        flow, [_, flow_t]= tf.nn.static_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
+        # dynamic rnn inputs=[batch_size, max_time, ...]
+        flow, [_, flow_t]= tf.nn.dynamic_rnn(cell=lstmcell, inputs=flow, dtype=tf.float32,scope='lstm'+str(i))
 
   with tf.name_scope('Output-Layer'):
     W_o = tf.get_variable('W_o', shape=[projection_units, num_classes], 

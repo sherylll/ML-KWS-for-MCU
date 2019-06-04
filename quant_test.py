@@ -224,8 +224,8 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
   total_conf_matrix = None
   for i in range(0, set_size, FLAGS.batch_size):
     validation_fingerprints, validation_ground_truth = (
-        audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
-                                 0.0, 0, 'validation', sess))
+            audio_processor.get_wav_files(FLAGS.batch_size, i, model_settings,'validation'))
+
     validation_accuracy, conf_matrix = sess.run(
         [evaluation_step, confusion_matrix],
         feed_dict={
@@ -248,8 +248,8 @@ def run_quant_inference(wanted_words, sample_rate, clip_duration_ms,
   total_accuracy = 0
   total_conf_matrix = None
   for i in range(0, set_size, FLAGS.batch_size):
-    test_fingerprints, test_ground_truth = audio_processor.get_data(
-        FLAGS.batch_size, i, model_settings, 0.0, 0.0, 0, 'testing', sess)
+    test_fingerprints, test_ground_truth = audio_processor.get_wav_files(
+        FLAGS.batch_size, i, model_settings, 'testing')
     
     test_accuracy, conf_matrix = sess.run(
         [evaluation_step, confusion_matrix],
@@ -336,12 +336,12 @@ if __name__ == '__main__':
   parser.add_argument(
       '--window_size_ms',
       type=float,
-      default=30.0,
+      default=32.0,
       help='How long each spectrogram timeslice is',)
   parser.add_argument(
       '--window_stride_ms',
       type=float,
-      default=10.0,
+      default=16.0,
       help='How long each spectrogram timeslice is',)
   parser.add_argument(
       '--dct_coefficient_count',

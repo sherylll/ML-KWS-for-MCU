@@ -36,6 +36,8 @@ from tensorflow.contrib.framework.python.ops import audio_ops as contrib_audio
 from tensorflow.python.ops import io_ops
 from tensorflow.python.platform import gfile
 from tensorflow.python.util import compat
+import scipy.io.wavfile as wav
+from python_speech_features import mfcc
 
 MAX_NUM_WAVS_PER_CLASS = 2**27 - 1  # ~134M
 SILENCE_LABEL = '_silence_'
@@ -160,7 +162,7 @@ class AudioProcessor(object):
                             wanted_words, validation_percentage,
                             testing_percentage)
     self.prepare_background_data()
-    self.prepare_processing_graph(model_settings)
+    # self.prepare_processing_graph(model_settings)
 
   def maybe_download_and_extract_dataset(self, data_url, dest_directory):
     """Download and extract data set tar file.
@@ -353,7 +355,8 @@ class AudioProcessor(object):
         wav_loader, desired_channels=1, desired_samples=desired_samples)
     # Allow the audio sample's volume to be adjusted.
     self.foreground_volume_placeholder_ = tf.placeholder(tf.float32, [])
-    scaled_foreground = tf.multiply(wav_decoder.audio,
+    self.audio_ = wav_decoder.audio
+    scaled_foreground = tf.multiply(self.audio_,
                                     self.foreground_volume_placeholder_)
     # Shift the sample's start position, and pad any gaps with zeros.
     self.time_shift_padding_placeholder_ = tf.placeholder(tf.int32, [2, 2])
@@ -396,7 +399,7 @@ class AudioProcessor(object):
     return len(self.data_index[mode])
 
   def get_data(self, how_many, offset, model_settings, background_frequency,
-               background_volume_range, time_shift, mode, sess):
+               background_volume_range, time_shift, mode, sess, debugging=False, wav_path=None):
     """Gather samples from the data set, applying transformations as needed.
 
     When the mode is 'training', a random selection of samples will be returned,
@@ -421,7 +424,11 @@ class AudioProcessor(object):
       one-hot form.
     """
     # Pick one of the partitions to choose samples from.
-    candidates = self.data_index[mode]
+    if debugging:
+      _, word = os.path.split(os.path.dirname(wav_path))
+      candidates = [{'label': word, 'file': wav_path}]
+    else:
+      candidates = self.data_index[mode]
     if how_many == -1:
       sample_count = len(candidates)
     else:
@@ -482,11 +489,13 @@ class AudioProcessor(object):
         input_dict[self.foreground_volume_placeholder_] = 1
       # Run the graph to produce the output audio.
       data[i - offset, :] = sess.run(self.mfcc_, feed_dict=input_dict).flatten()
+      print(data.shape, model_settings['fingerprint_size'])
       label_index = self.word_to_index[sample['label']]
       labels[i - offset, label_index] = 1
     return data, labels
 
-  def get_wav_files(self, how_many, offset, model_settings, mode):
+  def get_wav_files(self, how_many, offset, model_settings, mode, time_shift = 0,  background_frequency = 0,
+               background_volume_range = 0):
     """Return wav_file names and labels from train/val/test sets.
     """
     # Pick one of the partitions to choose samples from.
@@ -496,7 +505,8 @@ class AudioProcessor(object):
     else:
       sample_count = max(0, min(how_many, len(candidates) - offset))
     pick_deterministically = (mode != 'training')
-    wav_files = []
+    wav_file = None
+    data = np.zeros((sample_count, model_settings['fingerprint_size']))
     labels = np.zeros((sample_count, model_settings['label_count']))
     for i in xrange(offset, offset + sample_count):
       # Pick which audio sample to use.
@@ -506,12 +516,45 @@ class AudioProcessor(object):
         sample_index = np.random.randint(len(candidates))
       sample = candidates[sample_index]
       if sample['label'] == SILENCE_LABEL:
-        wav_files.append('silence.wav')
+        wav_file = 'silence.wav'
+        # wav_files.append('silence.wav')
       else:
-        wav_files.append(sample['file'])
+        wav_file = sample['file']
+        # wav_files.append(sample['file'])
       label_index = self.word_to_index[sample['label']]
       labels[i - offset, label_index] = 1
-    return wav_files, labels
+      audio_len = model_settings['desired_samples']
+      audio_data_pad = np.zeros(audio_len)
+      audio_rate, audio_data = wav.read(wav_file)
+      time_shift_amount = 0
+      if time_shift > 0:
+        time_shift_amount = np.random.randint(-time_shift, time_shift)
+
+      effective_audio_len = min(len(audio_data), audio_len)
+      if time_shift_amount >= 0:
+        audio_data_pad[:effective_audio_len-time_shift_amount] = audio_data[time_shift_amount:effective_audio_len]
+      else:
+        audio_data_pad[-effective_audio_len-time_shift_amount:] = audio_data[-effective_audio_len:time_shift_amount]
+      
+      if mode == 'training':
+        background_index = np.random.randint(len(self.background_data))
+        background_samples = self.background_data[background_index]
+        background_offset = np.random.randint(
+            0, len(background_samples) - audio_len)
+        background_clipped = background_samples[background_offset:(
+            background_offset + audio_len)]
+        if np.random.uniform(0, 1) < background_frequency:
+          background_volume = np.random.uniform(0, background_volume_range)
+        else:
+          background_volume = 0
+        audio_data_pad += background_volume * background_clipped
+      features = mfcc(audio_data_pad, samplerate=audio_rate, numcep=model_settings['dct_coefficient_count'], winfunc=np.hanning,
+                winlen=model_settings['window_s'],winstep=model_settings['stride_s'])
+      features = (features - np.mean(features))/np.std(features)
+      data[i - offset, :] = features.flatten() # shape!
+      labels[i - offset, label_index] = 1
+
+    return data, labels
 
 
   def get_unprocessed_data(self, how_many, model_settings, mode):
