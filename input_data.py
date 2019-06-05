@@ -550,12 +550,10 @@ class AudioProcessor(object):
         audio_data_pad += background_volume * background_clipped
       features = mfcc(audio_data_pad, samplerate=audio_rate, numcep=model_settings['dct_coefficient_count'], winfunc=np.hanning,
                 winlen=model_settings['window_s'],winstep=model_settings['stride_s'])
-      features = (features - np.mean(features))/np.std(features)
       data[i - offset, :] = features.flatten() # shape!
       labels[i - offset, label_index] = 1
 
     return data, labels
-
 
   def get_unprocessed_data(self, how_many, model_settings, mode):
     """Retrieve sample data for the given partition, with no transformations.
