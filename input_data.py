@@ -162,7 +162,7 @@ class AudioProcessor(object):
                             wanted_words, validation_percentage,
                             testing_percentage)
     self.prepare_background_data()
-    # self.prepare_processing_graph(model_settings)
+    self.prepare_processing_graph(model_settings)
 
   def maybe_download_and_extract_dataset(self, data_url, dest_directory):
     """Download and extract data set tar file.
@@ -376,17 +376,8 @@ class AudioProcessor(object):
                                  self.background_volume_placeholder_)
     background_add = tf.add(background_mul, sliced_foreground)
     background_clamp = tf.clip_by_value(background_add, -1.0, 1.0)
-    # Run the spectrogram and MFCC ops to get a 2D 'fingerprint' of the audio.
-    spectrogram = contrib_audio.audio_spectrogram(
-        background_clamp,
-        window_size=model_settings['window_size_samples'],
-        stride=model_settings['window_stride_samples'],
-        magnitude_squared=True)
-    self.mfcc_ = contrib_audio.mfcc(
-        spectrogram,
-        wav_decoder.sample_rate,
-        dct_coefficient_count=model_settings['dct_coefficient_count'])
-        
+    self.processed_audio = background_clamp
+
   def set_size(self, mode):
     """Calculates the number of samples in the dataset partition.
 
@@ -488,71 +479,12 @@ class AudioProcessor(object):
       else:
         input_dict[self.foreground_volume_placeholder_] = 1
       # Run the graph to produce the output audio.
-      data[i - offset, :] = sess.run(self.mfcc_, feed_dict=input_dict).flatten()
-      print(data.shape, model_settings['fingerprint_size'])
-      label_index = self.word_to_index[sample['label']]
-      labels[i - offset, label_index] = 1
-    return data, labels
-
-  def get_wav_files(self, how_many, offset, model_settings, mode, time_shift = 0,  background_frequency = 0,
-               background_volume_range = 0):
-    """Return wav_file names and labels from train/val/test sets.
-    """
-    # Pick one of the partitions to choose samples from.
-    candidates = self.data_index[mode]
-    if how_many == -1:
-      sample_count = len(candidates)
-    else:
-      sample_count = max(0, min(how_many, len(candidates) - offset))
-    pick_deterministically = (mode != 'training')
-    wav_file = None
-    data = np.zeros((sample_count, model_settings['fingerprint_size']))
-    labels = np.zeros((sample_count, model_settings['label_count']))
-    for i in xrange(offset, offset + sample_count):
-      # Pick which audio sample to use.
-      if how_many == -1 or pick_deterministically:
-        sample_index = i
-      else:
-        sample_index = np.random.randint(len(candidates))
-      sample = candidates[sample_index]
-      if sample['label'] == SILENCE_LABEL:
-        wav_file = 'silence.wav'
-        # wav_files.append('silence.wav')
-      else:
-        wav_file = sample['file']
-        # wav_files.append(sample['file'])
-      label_index = self.word_to_index[sample['label']]
-      labels[i - offset, label_index] = 1
-      audio_len = model_settings['desired_samples']
-      audio_data_pad = np.zeros(audio_len)
-      audio_rate, audio_data = wav.read(wav_file)
-      time_shift_amount = 0
-      if time_shift > 0:
-        time_shift_amount = np.random.randint(-time_shift, time_shift)
-
-      effective_audio_len = min(len(audio_data), audio_len)
-      if time_shift_amount >= 0:
-        audio_data_pad[:effective_audio_len-time_shift_amount] = audio_data[time_shift_amount:effective_audio_len]
-      else:
-        audio_data_pad[-effective_audio_len-time_shift_amount:] = audio_data[-effective_audio_len:time_shift_amount]
-      
-      if mode == 'training':
-        background_index = np.random.randint(len(self.background_data))
-        background_samples = self.background_data[background_index]
-        background_offset = np.random.randint(
-            0, len(background_samples) - audio_len)
-        background_clipped = background_samples[background_offset:(
-            background_offset + audio_len)]
-        if np.random.uniform(0, 1) < background_frequency:
-          background_volume = np.random.uniform(0, background_volume_range)
-        else:
-          background_volume = 0
-        audio_data_pad += background_volume * background_clipped
-      features = mfcc(audio_data_pad, samplerate=audio_rate, numcep=model_settings['dct_coefficient_count'], winfunc=np.hanning,
-                winlen=model_settings['window_s'],winstep=model_settings['stride_s'])
+      processed_audio = sess.run(self.processed_audio, feed_dict=input_dict).flatten()
+      features = mfcc(processed_audio, samplerate=model_settings['sample_rate'], numcep=model_settings['dct_coefficient_count'], winfunc=np.hanning,
+          winlen=model_settings['window_s'],winstep=model_settings['stride_s'])
       data[i - offset, :] = features.flatten() # shape!
+      label_index = self.word_to_index[sample['label']]
       labels[i - offset, label_index] = 1
-
     return data, labels
 
   def get_unprocessed_data(self, how_many, model_settings, mode):

@@ -221,9 +221,9 @@ def main(_):
         learning_rate_value = learning_rates_list[i]
         break
     # Pull the audio samples we'll use for training.
-    train_fingerprints, train_ground_truth = audio_processor.get_wav_files(
-        FLAGS.batch_size, 0, model_settings, 'training', time_shift=time_shift_samples,
-        background_frequency=FLAGS.background_frequency, background_volume_range=FLAGS.background_volume)
+    train_fingerprints, train_ground_truth = audio_processor.get_data(
+        FLAGS.batch_size, 0, model_settings, FLAGS.background_frequency,
+        FLAGS.background_volume, time_shift_samples, 'training', sess)
     
     # train_std = 11.558333964158848 
     # train_mean = -1.5683672671004598
@@ -253,7 +253,8 @@ def main(_):
       total_conf_matrix = None
       for i in xrange(0, set_size, FLAGS.batch_size):
         validation_fingerprints, validation_ground_truth = (
-            audio_processor.get_wav_files(FLAGS.batch_size, i, model_settings,'validation'))
+            audio_processor.get_data(FLAGS.batch_size, i, model_settings, 0.0,
+            0.0, 0, 'validation', sess))
         # val_std = 20.91701306351207 
         # val_mean = -3.0561562801250295
         # validation_fingerprints = (validation_fingerprints - val_mean)/val_std
@@ -291,8 +292,8 @@ def main(_):
   total_accuracy = 0
   total_conf_matrix = None
   for i in xrange(0, set_size, FLAGS.batch_size):
-    test_fingerprints, test_ground_truth = audio_processor.get_wav_files(
-        FLAGS.batch_size, i, model_settings, 'testing')
+    test_fingerprints, test_ground_truth = audio_processor.get_data(
+        FLAGS.batch_size, i, model_settings, 0.0, 0.0, 0, 'testing', sess)
     test_accuracy, conf_matrix = sess.run(
         [evaluation_step, confusion_matrix],
         feed_dict={
@@ -390,7 +391,7 @@ if __name__ == '__main__':
   parser.add_argument(
       '--window_stride_ms',
       type=float,
-      default=16.0,
+      default=32.0,
       help='How long each spectrogram timeslice is',)
   parser.add_argument(
       '--dct_coefficient_count',
